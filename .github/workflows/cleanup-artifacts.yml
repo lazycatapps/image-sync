@@ -1,0 +1,128 @@
+name: Cleanup GitHub Artifacts
+
+on:
+  # 每周日凌晨3点运行
+  schedule:
+    - cron: '0 3 * * 0'
+  # 允许手动触发
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: 'Number of days to keep artifacts'
+        required: false
+        default: '15'
+        type: string
+      dry_run:
+        description: 'Dry run mode (only show what would be deleted)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    # Security: Only run on main repository, not forks
+    if: github.repository_owner == 'lazycatapps'
+
+    steps:
+      - name: Cleanup old artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          # 设置保留天数
+          RETENTION_DAYS=${{ inputs.retention_days || '15' }}
+          DRY_RUN=${{ inputs.dry_run || 'false' }}
+
+          echo "=== DEBUG INFO ==="
+          echo "Repository: ${REPO}"
+          echo "Retention days: ${RETENTION_DAYS}"
+          echo "Dry run mode: ${DRY_RUN}"
+          echo "=================="
+
+          # 计算截止日期
+          CUTOFF_DATE=$(date -u -d "${RETENTION_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-${RETENTION_DAYS}d +%Y-%m-%dT%H:%M:%SZ)
+          echo "Cutoff date: ${CUTOFF_DATE}"
+
+          # 获取所有 artifacts (按创建时间升序排序，最早的在前)
+          echo "Fetching artifacts..."
+          ARTIFACTS=$(gh api repos/${REPO}/actions/artifacts --paginate --jq '.artifacts | sort_by(.created_at) | .[] | {id: .id, name: .name, created_at: .created_at, size_in_bytes: .size_in_bytes}')
+
+          if [ -z "$ARTIFACTS" ]; then
+            echo "No artifacts found"
+            exit 0
+          fi
+
+          TOTAL_COUNT=0
+          TOTAL_SIZE=0
+          DELETE_COUNT=0
+          DELETE_SIZE=0
+          SUCCESS_COUNT=0
+          FAILED_COUNT=0
+
+          # 统计所有 artifacts
+          while IFS= read -r artifact; do
+            TOTAL_COUNT=$((TOTAL_COUNT + 1))
+            SIZE=$(echo "$artifact" | jq -r '.size_in_bytes')
+            TOTAL_SIZE=$((TOTAL_SIZE + SIZE))
+          done <<< "$ARTIFACTS"
+
+          echo "Total artifacts: ${TOTAL_COUNT}"
+          echo "Total size: $(numfmt --to=iec-i --suffix=B ${TOTAL_SIZE} 2>/dev/null || echo "${TOTAL_SIZE} bytes")"
+
+          # 删除过期的 artifacts
+          echo ""
+          echo "Processing artifacts..."
+          while IFS= read -r artifact; do
+            ID=$(echo "$artifact" | jq -r '.id')
+            NAME=$(echo "$artifact" | jq -r '.name')
+            CREATED=$(echo "$artifact" | jq -r '.created_at')
+            SIZE=$(echo "$artifact" | jq -r '.size_in_bytes')
+
+            # 比较日期
+            if [[ "$CREATED" < "$CUTOFF_DATE" ]]; then
+              DELETE_COUNT=$((DELETE_COUNT + 1))
+              DELETE_SIZE=$((DELETE_SIZE + SIZE))
+
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "Would delete artifact: ${NAME} (created: ${CREATED}, size: $(numfmt --to=iec-i --suffix=B ${SIZE} 2>/dev/null || echo "${SIZE} bytes"))"
+                SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+              else
+                echo -n "Deleting artifact: ${NAME} (created: ${CREATED}, size: $(numfmt --to=iec-i --suffix=B ${SIZE} 2>/dev/null || echo "${SIZE} bytes")) ... "
+
+                # 删除 artifact
+                if gh api repos/${REPO}/actions/artifacts/${ID} -X DELETE > /dev/null 2>&1; then
+                  echo "OK"
+                  SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+                else
+                  echo "FAILED"
+                  FAILED_COUNT=$((FAILED_COUNT + 1))
+                fi
+
+                # 添加延迟避免速率限制
+                sleep 0.5
+              fi
+            fi
+          done <<< "$ARTIFACTS"
+
+          echo ""
+          echo "=== CLEANUP SUMMARY ==="
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Mode: DRY RUN (no actual deletions)"
+          fi
+          echo "Total artifacts: ${TOTAL_COUNT}"
+          echo "Total size: $(numfmt --to=iec-i --suffix=B ${TOTAL_SIZE} 2>/dev/null || echo "${TOTAL_SIZE} bytes")"
+          echo "Artifacts to delete: ${DELETE_COUNT}"
+          echo "Size to free: $(numfmt --to=iec-i --suffix=B ${DELETE_SIZE} 2>/dev/null || echo "${DELETE_SIZE} bytes")"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Would delete: ${SUCCESS_COUNT}"
+          else
+            echo "Successfully deleted: ${SUCCESS_COUNT}"
+            if [ $FAILED_COUNT -gt 0 ]; then
+              echo "Failed to delete: ${FAILED_COUNT}"
+              echo "Warning: Some deletions failed, but continuing..."
+            fi
+          fi
+          echo "Remaining artifacts: $((TOTAL_COUNT - SUCCESS_COUNT))"
+          echo "======================="

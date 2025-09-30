@@ -1,0 +1,235 @@
+# app 的唯一 id,上架到商店需要保证不要冲突,尽量使用开发者自己的域名作为后缀.
+package: cloud.lazycat.app.liu.imagesync
+# app 的版本
+version: 0.0.1
+
+name: Image Sync
+keyword: docker, image, snyc
+description: 镜像同步工具，支持多种镜像仓库之间的同步
+
+# 软件名称,会显示在启动器之类的地方
+locales:
+  zh:
+    name: OCI 镜像同步
+    description: |
+      ## Image Sync - 容器镜像同步工具
+
+      基于 Skopeo 的容器镜像同步工具，提供简洁的 Web UI 界面，支持在不同容器镜像仓库之间快速同步镜像。
+
+      ## 主要功能
+
+      - 🚀 简单易用的 Web UI 界面
+      - 🔐 支持私有仓库认证（用户名/密码）
+      - 📦 基于 Skopeo 底层实现，稳定可靠
+      - 🎯 支持跨仓库镜像拷贝
+      - 🏗️ 支持多架构镜像同步（可查询并选择特定架构）
+      - 📊 实时日志输出，同步过程一目了然
+      - 💾 用户配置保存与管理（支持多配置快速切换）
+      - 🔒 OIDC 统一认证支持（用户配置隔离）
+      - 🐛 内置调试工具，方便移动端和生产环境排障
+
+      ## 使用说明
+
+      1. 填写**源镜像地址**（例如：`docker.io/library/nginx:latest`）
+         - 如果是私有仓库，填写对应的用户名和密码
+         - 可以选择是否验证 TLS 证书（默认会验证）
+
+      2. **查询可用架构**（可选）
+         - 点击"查询可用架构"按钮查看镜像支持的所有架构
+         - 查询结果会以蓝色标签形式显示
+         - 可以选择特定架构或同步所有架构
+
+      3. 填写**目标镜像地址**（例如：`registry.example.com/nginx:latest`）
+         - 如果目标是私有仓库，填写对应的用户名和密码
+         - 可以选择是否验证 TLS 证书
+
+      4. 点击**开始同步**按钮
+         - 实时查看同步进度和日志
+         - 任务完成后会显示成功或失败状态
+
+      ## 配置保存功能
+
+      - 通过**高级选项面板**可以保存常用配置，方便下次使用
+      - 支持多配置管理，每个配置最大 4KB
+      - 每个用户最多保存 1000 个配置
+      - 启用 OIDC 认证后，配置自动隔离，每个用户独立管理
+      - **密码保存控制**：默认不保存密码（极致安全），可通过配置启用
+
+      ## 安全特性
+
+      ### 防护机制
+      - ✅ **命令注入防护**：不经过 shell，从根本上避免命令注入风险
+      - ✅ **输入验证**：所有用户输入经过严格的白名单验证（正则表达式匹配标准镜像地址格式）
+      - ✅ **参数注入防护**：拒绝包含 shell 元字符的输入，防止参数注入攻击
+      - ✅ **DoS 防护**：限制输入长度（镜像地址 512 字符，用户名 256 字符），防止内存耗尽攻击
+
+      ### 凭据安全
+      - ✅ **密码默认不保存**：配置保存功能默认禁止存储密码（`--allow-password-save=false`），确保配置文件中不包含敏感凭据
+      - ✅ **日志自动脱敏**：所有日志输出中的凭据信息自动替换为 `***:***`，防止敏感信息泄露
+      - ✅ **HTTPS 传输**：生产环境凭据通过 HTTPS POST 请求体传输，不通过 URL 参数
+      - ✅ **内存临时存储**：凭据仅在执行 Skopeo 时临时使用，不持久化到磁盘
+
+      ### 用户隔离
+      - ✅ **OIDC 统一认证**：与 Lazycat Cloud 微服认证系统集成，自动验证用户身份
+      - ✅ **配置隔离**：每个用户的配置存储在独立目录，完全隔离互不影响
+      - ✅ **会话管理**：HttpOnly Cookie，7 天有效期，自动过期清理
+      - ✅ **访问控制**：所有镜像同步 API 均需认证，未认证访问自动跳转登录
+
+      ### 资源限制
+      - ✅ **配置大小限制**：单个配置最大 4KB，防止存储空间滥用
+      - ✅ **配置数量限制**：每个用户最多 1000 个配置，防止 DoS 攻击
+      - ✅ **超时控制**：默认 10 分钟超时，防止任务无限执行消耗资源
+
+  en:
+    name: OCI Image Sync
+    description: |
+      ## Image Sync - Container Image Synchronization Tool
+
+      A container image synchronization tool based on Skopeo, providing a clean Web UI interface that supports fast image synchronization between different container registries.
+
+      ## Key Features
+
+      - 🚀 Simple and easy-to-use Web UI interface
+      - 🔐 Private registry authentication support (username/password)
+      - 📦 Built on Skopeo for stable and reliable performance
+      - 🎯 Cross-registry image copying support
+      - 🏗️ Multi-architecture image synchronization (query and select specific architectures)
+      - 📊 Real-time log output for transparent sync process
+      - 💾 User configuration save and management (quick switching between multiple configs)
+      - 🔒 OIDC unified authentication support (user configuration isolation)
+      - 🐛 Built-in debugging tools for mobile and production troubleshooting
+
+      ## Usage Instructions
+
+      1. Fill in **Source Image Address** (e.g., `docker.io/library/nginx:latest`)
+         - For private registries, provide username and password
+         - Choose whether to verify TLS certificates (verified by default)
+
+      2. **Query Available Architectures** (optional)
+         - Click "Query Architectures" button to view all supported architectures
+         - Results displayed as blue tags
+         - Select specific architecture or sync all architectures
+
+      3. Fill in **Destination Image Address** (e.g., `registry.example.com/nginx:latest`)
+         - For private registries, provide username and password
+         - Choose whether to verify TLS certificates
+
+      4. Click **Start Sync** button
+         - View sync progress and logs in real-time
+         - Success or failure status displayed upon completion
+
+      ## Configuration Save Feature
+
+      - Save frequently-used configurations via **Advanced Options Panel**
+      - Multi-configuration management support, max 4KB per config
+      - Maximum 1000 configs per user
+      - With OIDC authentication enabled, configs are automatically isolated per user
+      - **Password Save Control**: Passwords not saved by default (maximum security), can be enabled via configuration
+
+      ## Security Features
+
+      ### Protection Mechanisms
+      - ✅ **Command Injection Protection**: No shell execution, fundamentally prevents command injection
+      - ✅ **Input Validation**: All user inputs strictly validated with whitelist (regex matching standard image address format)
+      - ✅ **Parameter Injection Protection**: Rejects inputs containing shell metacharacters to prevent parameter injection attacks
+      - ✅ **DoS Protection**: Input length limits (512 chars for image addresses, 256 chars for usernames) prevent memory exhaustion attacks
+
+      ### Credential Security
+      - ✅ **Passwords Not Saved by Default**: Config save feature disables password storage by default (`--allow-password-save=false`), ensuring no sensitive credentials in config files
+      - ✅ **Automatic Log Sanitization**: All credential information in logs automatically replaced with `***:***` to prevent sensitive data leakage
+      - ✅ **HTTPS Transmission**: Production environment credentials transmitted via HTTPS POST request body, not URL parameters
+      - ✅ **Temporary Memory Storage**: Credentials only used temporarily during Skopeo execution, not persisted to disk
+
+      ### User Isolation
+      - ✅ **OIDC Unified Authentication**: Integrated with Lazycat Cloud microservice authentication system, automatic user identity verification
+      - ✅ **Configuration Isolation**: Each user's configurations stored in separate directories, completely isolated
+      - ✅ **Session Management**: HttpOnly Cookie, 7-day validity, automatic expiration cleanup
+      - ✅ **Access Control**: All image sync APIs require authentication, unauthenticated access automatically redirects to login
+
+      ### Resource Limits
+      - ✅ **Config Size Limit**: Maximum 4KB per config, prevents storage space abuse
+      - ✅ **Config Count Limit**: Maximum 1000 configs per user, prevents DoS attacks
+      - ✅ **Timeout Control**: Default 10-minute timeout, prevents infinite task execution consuming resources
+
+# 软件本身的 license
+license: https://choosealicense.com/licenses/mit/
+
+# 软件的主页,会在商店等地方体现
+homepage: https://github.com/lazycatapps/image-sync
+
+# lpk 的作者,会在商店等地方体现
+author: liu
+
+# application 作为一个特殊的 container 运行，对应的 service 名称为固定的`app`， 其他 service 可以通过此名称与 app 进行通讯
+application:
+  #是否存在后台任务， 若存在则系统不会对此 app 进行主动休眠等操作
+  background_task: false
+
+  # 期望的 app 域名，如果系统中已经有对应域名则会提示用户选择其他域名。 最终 app 分配到的域名以/lzcapp/run/app.subdomain 为准
+  subdomain: imagesync
+
+  # OIDC 认证回调路径
+  oidc_redirect_path: /api/v1/auth/callback
+
+  routes:
+    - /=file:///lzcapp/pkg/content/web
+    - /api/=http://backend.cloud.lazycat.app.liu.imagesync.lzcapp:59901/api/
+
+  depends_on:
+    - backend
+
+  # 是否启用多实例
+  multi_instance: false
+
+services:
+  # init:
+  #   image: ##IMAGE_PLACEHOLDER##
+  #   # image: docker-registry-ui.${LAZYCAT_BOX_NAME}.heiyu.space/image-sync/backend:latest
+  #   user: root
+  #   binds:
+  #     - /lzcapp/var/configs:/configs
+  #   entrypoint: /bin/sh
+  #   command: -c "chown -R 65532:65532 /configs"
+
+  backend:
+    image: ##IMAGE_PLACEHOLDER##
+    # image: docker-registry-ui.${LAZYCAT_BOX_NAME}.heiyu.space/image-sync/backend:latest
+    # Currently only root can create configs directory and write files
+    user: root
+    environment:
+      # 服务监听配置
+      - SYNC_HOST=host.lzcapp
+      - SYNC_PORT=59901
+
+      # 同步任务配置
+      - SYNC_TIMEOUT=600  # 同步超时时间（秒），默认 600
+
+      # 默认镜像仓库地址
+      # - SYNC_DEFAULT_SOURCE_REGISTRY=registry.lazycat.cloud/lzc/lzcapp:3.20.3-1
+      # - SYNC_DEFAULT_DEST_REGISTRY=docker-registry-ui.${LAZYCAT_BOX_NAME}.heiyu.space/alpine:latest
+
+      # CORS 跨域配置
+      - SYNC_CORS_ALLOWED_ORIGINS=http://host.lzcapp:59901,https://${LAZYCAT_APP_DOMAIN}
+
+      # 用户配置存储设置
+      - SYNC_CONFIG_DIR=/configs  # 配置文件存储目录，默认 /configs
+      - SYNC_ALLOW_PASSWORD_SAVE=false  # 是否允许保存密码到配置文件，默认 false（极致安全）
+      - SYNC_MAX_CONFIG_SIZE=4096  # 单个配置文件最大大小（字节），默认 4096
+      - SYNC_MAX_CONFIG_FILES=1000  # 每个用户最大配置文件数量，默认 1000
+
+      # 时区配置
+      - TZ=Asia/Shanghai
+
+      # OIDC 认证配置（自动注入，无需手动修改）
+      - SYNC_OIDC_CLIENT_ID=${LAZYCAT_AUTH_OIDC_CLIENT_ID}
+      - SYNC_OIDC_CLIENT_SECRET=${LAZYCAT_AUTH_OIDC_CLIENT_SECRET}
+      - SYNC_OIDC_ISSUER=${LAZYCAT_AUTH_OIDC_ISSUER_URI}
+      - SYNC_OIDC_REDIRECT_URL=https://${LAZYCAT_APP_DOMAIN}/api/v1/auth/callback
+    # 使用主机网络模式 考虑 registry.lazycat.cloud 的镜像时需要用到
+    network_mode: "host"
+    health_check:
+      test_url: http://host.lzcapp:59901/api/v1/health
+      start_period: 30s
+      disable: false
+    binds:
+      - /lzcapp/var/configs:/configs

@@ -1,0 +1,196 @@
+name: Cleanup Docker Hub Tags
+
+on:
+  # 每周日凌晨2点运行
+  schedule:
+    - cron: '0 2 * * 0'
+  # 允许手动触发
+  workflow_dispatch:
+    inputs:
+      keep_count:
+        description: 'Number of recent SHA tags to keep'
+        required: false
+        default: '10'
+        type: string
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    # Security: Only run on main repository, not forks
+    if: github.repository_owner == 'lazycatapps'
+
+    steps:
+      - name: Cleanup old SHA tags
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          REPO_NAME: ${{ github.repository }}
+        run: |
+          # 提取仓库名
+          REPO_NAME=${GITHUB_REPOSITORY#*/}
+
+          # 设置保留的标签数量
+          KEEP_COUNT=${{ inputs.keep_count || '10' }}
+
+          # 调试信息
+          echo "=== DEBUG INFO ==="
+          echo "Repository: ${GITHUB_REPOSITORY}"
+          echo "Repo name: ${REPO_NAME}"
+          echo "Keep count: ${KEEP_COUNT}"
+          echo "DockerHub username: ${DOCKERHUB_USERNAME}"
+          echo "=================="
+
+          # 获取访问令牌
+          echo "Authenticating with Docker Hub..."
+          AUTH_RESPONSE=$(curl -s -H "Content-Type: application/json" -X POST \
+            -d '{"username": "'${DOCKERHUB_USERNAME}'", "password": "'${DOCKERHUB_TOKEN}'"}' \
+            https://hub.docker.com/v2/users/login/)
+
+          # 安全的调试信息
+          echo "Auth response status: $(echo "$AUTH_RESPONSE" | jq -r 'if has("token") then "success" else "failed" end')"
+          if echo "$AUTH_RESPONSE" | jq -e 'has("detail")' > /dev/null 2>&1; then
+            echo "Auth error detail: $(echo "$AUTH_RESPONSE" | jq -r '.detail // "unknown"')"
+          fi
+
+          TOKEN=$(echo "$AUTH_RESPONSE" | jq -r .token)
+
+          if [ "$TOKEN" = "null" ] || [ -z "$TOKEN" ]; then
+            echo "Failed to authenticate with Docker Hub"
+            echo "Auth response keys: $(echo "$AUTH_RESPONSE" | jq -r 'keys | join(", ")')"
+            exit 1
+          fi
+
+          echo "Authentication successful"
+
+          # 获取所有 SHA 标签（支持分页）
+          echo "Fetching tags for ${DOCKERHUB_USERNAME}/${REPO_NAME}..."
+          ALL_SHA_TAGS=""
+          PAGE=1
+
+          while true; do
+            echo "Fetching page ${PAGE}..."
+            RESPONSE=$(curl -s -H "Authorization: JWT ${TOKEN}" \
+              "https://hub.docker.com/v2/repositories/${DOCKERHUB_USERNAME}/${REPO_NAME}/tags/?page=${PAGE}&page_size=100")
+
+            # 调试：检查响应状态
+            echo "Response contains results field: $(echo "$RESPONSE" | jq -e '.results' > /dev/null 2>&1 && echo "yes" || echo "no")"
+
+            # 检查 API 响应是否有效
+            if ! echo "$RESPONSE" | jq -e '.results' > /dev/null 2>&1; then
+              echo "Error: Invalid API response from Docker Hub"
+              echo "Response keys: $(echo "$RESPONSE" | jq -r 'keys | join(", ")' 2>/dev/null || echo "invalid json")"
+              if echo "$RESPONSE" | jq -e 'has("detail")' > /dev/null 2>&1; then
+                echo "Error detail: $(echo "$RESPONSE" | jq -r '.detail')"
+              fi
+              exit 1
+            fi
+
+            # 调试：显示当前页的标签信息
+            TOTAL_TAGS=$(echo "$RESPONSE" | jq -r '.results | length')
+            echo "Total tags on page ${PAGE}: ${TOTAL_TAGS}"
+
+            # 显示所有标签名称（用于调试）
+            echo "All tags on this page:"
+            echo "$RESPONSE" | jq -r '.results[].name' | head -10
+            if [ "$TOTAL_TAGS" -gt 10 ]; then
+              echo "... and $((TOTAL_TAGS - 10)) more tags"
+            fi
+
+            # 提取当前页的 SHA 标签，按时间排序
+            PAGE_SHA_TAGS=$(echo "$RESPONSE" | jq -r '.results[] | select(.name | startswith("sha-")) | "\(.last_updated) \(.name)"')
+            SHA_COUNT=$(echo "$PAGE_SHA_TAGS" | grep -c '^' 2>/dev/null || echo "0")
+            echo "SHA tags found on page ${PAGE}: ${SHA_COUNT}"
+
+            if [ -z "$PAGE_SHA_TAGS" ]; then
+              echo "No more SHA tags found, breaking loop"
+              break
+            fi
+
+            ALL_SHA_TAGS="${ALL_SHA_TAGS}${PAGE_SHA_TAGS}"$'\n'
+
+            # 检查是否还有下一页
+            NEXT_URL=$(echo "$RESPONSE" | jq -r '.next // empty')
+            echo "Next page URL exists: $([ -n "$NEXT_URL" ] && [ "$NEXT_URL" != "null" ] && echo "yes" || echo "no")"
+            if [ -z "$NEXT_URL" ] || [ "$NEXT_URL" = "null" ]; then
+              break
+            fi
+
+            PAGE=$((PAGE + 1))
+          done
+
+          # 移除空行并按时间排序（最新的在前）
+          # 按时间戳排序，最新的在前（倒序）
+          SORTED_SHA_TAGS=$(echo "$ALL_SHA_TAGS" | grep -v '^$' | sort -k1,1r)
+
+          echo "=== PROCESSING RESULTS ==="
+          TOTAL_SHA_FOUND=$(echo "$SORTED_SHA_TAGS" | wc -l | tr -d ' ')
+          echo "Total SHA tags found across all pages: ${TOTAL_SHA_FOUND}"
+
+          if [ -z "$SORTED_SHA_TAGS" ]; then
+            echo "No SHA tags found"
+            exit 0
+          fi
+
+          # 显示前几个 SHA 标签用于调试
+          echo "First 5 SHA tags (newest first):"
+          echo "$SORTED_SHA_TAGS" | head -5
+
+          # 获取需要删除的标签（保留最新的KEEP_COUNT个）
+          # 先获取要删除的标签（时间戳 + 标签名）
+          TAGS_TO_DELETE_WITH_TIME=$(echo "$SORTED_SHA_TAGS" | tail -n +$((KEEP_COUNT + 1)))
+          # 按时间戳正序排序（最早的在前），然后提取标签名
+          TAGS_TO_DELETE=$(echo "$TAGS_TO_DELETE_WITH_TIME" | sort -k1,1 | awk '{print $2}')
+          DELETE_COUNT=$(echo "$TAGS_TO_DELETE" | grep -c '^' 2>/dev/null || echo "0")
+
+          echo "Tags analysis:"
+          echo "- Total SHA tags: ${TOTAL_SHA_FOUND}"
+          echo "- Keep count: ${KEEP_COUNT}"
+          echo "- Tags to delete: ${DELETE_COUNT}"
+
+          if [ -z "$TAGS_TO_DELETE" ]; then
+            echo "No SHA tags to delete (keeping ${KEEP_COUNT} most recent)"
+            exit 0
+          fi
+
+          echo "Tags to delete (oldest first):"
+          echo "$TAGS_TO_DELETE"
+
+          echo "Tags to keep (newest ${KEEP_COUNT}):"
+          echo "$SORTED_SHA_TAGS" | head -${KEEP_COUNT} | awk '{print $2}'
+
+          echo "Found $(echo "$SORTED_SHA_TAGS" | wc -l) total SHA tags"
+          echo "Will keep ${KEEP_COUNT} most recent tags"
+          echo "Will delete $(echo "$TAGS_TO_DELETE" | wc -l) tags"
+
+          # 删除旧标签
+          SUCCESS_COUNT=0
+          FAILED_COUNT=0
+
+          for tag in $TAGS_TO_DELETE; do
+            echo -n "Deleting tag: $tag ... "
+
+            HTTP_CODE=$(curl -s -w "%{http_code}" -X DELETE \
+              -H "Authorization: JWT ${TOKEN}" \
+              "https://hub.docker.com/v2/repositories/${DOCKERHUB_USERNAME}/${REPO_NAME}/tags/${tag}/" \
+              -o /dev/null)
+
+            if [ "$HTTP_CODE" = "204" ]; then
+              echo "OK"
+              SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+            else
+              echo "FAILED (HTTP $HTTP_CODE)"
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+            fi
+
+            # 添加延迟避免速率限制
+            sleep 1
+          done
+
+          echo ""
+          echo "Cleanup completed"
+          echo "Successfully deleted: $SUCCESS_COUNT tags"
+          if [ $FAILED_COUNT -gt 0 ]; then
+            echo "Failed to delete: $FAILED_COUNT tags"
+            echo "Warning: Some deletions failed, but continuing..."
+          fi

@@ -1,0 +1,106 @@
+.App {
+  min-height: 100vh;
+  background-color: #f0f2f5;
+  padding: 40px 20px;
+}
+
+/* Ensure message component appears above all modals */
+.ant-message {
+  z-index: 2000 !important;
+}
+
+.container {
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.container h2 {
+  text-align: center;
+  margin-bottom: 30px;
+  color: #1890ff;
+}
+
+.source-section {
+  background-color: #e6f7ff;
+  padding: 20px;
+  border-radius: 8px;
+  margin-bottom: 24px;
+}
+
+.dest-section {
+  background-color: #f6ffed;
+  padding: 20px;
+  border-radius: 8px;
+  margin-bottom: 24px;
+}
+
+.footer {
+  text-align: center;
+  margin-top: 20px;
+  padding-bottom: 20px;
+}
+
+@media (max-width: 768px) {
+  .App {
+    padding: 8px;
+  }
+
+  .container {
+    width: 100%;
+    max-width: 100%;
+    padding: 0;
+  }
+
+  .container h2 {
+    font-size: 18px;
+    margin-bottom: 12px;
+  }
+
+  .source-section,
+  .dest-section {
+    padding: 12px;
+    margin-bottom: 12px;
+  }
+
+  .ant-card {
+    border-radius: 4px;
+  }
+
+  .ant-card-body {
+    padding: 12px 8px;
+  }
+
+  .ant-space {
+    gap: 6px !important;
+  }
+
+  .ant-form-item {
+    margin-bottom: 12px;
+  }
+
+  .ant-form-item-label {
+    padding-bottom: 4px;
+  }
+
+  .ant-input,
+  .ant-input-password,
+  .ant-select-selector {
+    font-size: 16px !important;
+    padding: 6px 11px;
+  }
+
+  .ant-btn {
+    padding: 6px 15px;
+    height: auto;
+  }
+
+  .ant-select-single:not(.ant-select-customize-input) .ant-select-selector {
+    padding: 0 11px;
+    height: 38px;
+  }
+
+  .ant-select-single .ant-select-selector .ant-select-selection-item,
+  .ant-select-single .ant-select-selector .ant-select-selection-placeholder {
+    line-height: 38px;
+  }
+}

@@ -1,0 +1,280 @@
+# Lazycat LPK Package Build Workflow
+# Reference: https://lazycat.cloud/playground/guideline/572
+# This workflow builds and publishes Lazycat LPK packages after successful Docker image builds
+name: Build LPK Package
+
+on:
+  # Trigger when the Docker build workflow completes successfully
+  workflow_run:
+    workflows: ["Build & Push (Docker Hub)"]
+    types:
+      - "completed"
+
+  # Allow manual triggering with custom Docker image tag
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Docker image tag to use for building LPK package'
+        required: false
+        default: 'main'
+        type: string
+      version:
+        description: 'Custom version for the LPK package (optional) such as 0.0.1'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  build-lpk:
+    runs-on: ubuntu-latest
+    # Only run if manually triggered, pull request, or if the upstream Docker workflow succeeded
+    # Security: Only run on main repository, not forks
+    if: ${{ github.repository_owner == 'lazycatapps' && (github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')) }}
+
+    steps:
+      # Checkout the repository code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Use appropriate ref based on trigger type
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.workflow_run.head_sha) }}
+
+      # Determine the Docker image name and tag to use
+      - name: Get Docker image information
+        id: docker-info
+        run: |
+          # Extract repository name from full repository path
+          REPO_NAME=${GITHUB_REPOSITORY#*/}
+          echo "image_name=${{ secrets.DOCKERHUB_USERNAME }}/${REPO_NAME}" >> $GITHUB_OUTPUT
+
+          # Set image tag based on trigger type
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Manual trigger: use specified tag or default
+            TAG="${{ inputs.image_tag }}"
+            echo "image_tag=${TAG}" >> $GITHUB_OUTPUT
+            echo "full_image=${{ secrets.DOCKERHUB_USERNAME }}/${REPO_NAME}:${TAG}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            # Pull request trigger: use pull request head commit SHA as tag (short form to match Docker metadata action)
+            SHORT_SHA=$(echo "${{ github.event.pull_request.head.sha }}" | cut -c1-7)
+            TAG="sha-${SHORT_SHA}"
+            echo "image_tag=${TAG}" >> $GITHUB_OUTPUT
+            echo "full_image=${{ secrets.DOCKERHUB_USERNAME }}/${REPO_NAME}:${TAG}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            # Direct tag trigger: use the tag name directly
+            TAG="${{ github.ref_name }}"
+            echo "image_tag=${TAG}" >> $GITHUB_OUTPUT
+            echo "full_image=${{ secrets.DOCKERHUB_USERNAME }}/${REPO_NAME}:${TAG}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "workflow_run" ] && [[ "${{ github.event.workflow_run.head_branch }}" == v* ]]; then
+            # Workflow_run trigger from tag: use the tag name directly
+            TAG="${{ github.event.workflow_run.head_branch }}"
+            echo "image_tag=${TAG}" >> $GITHUB_OUTPUT
+            echo "full_image=${{ secrets.DOCKERHUB_USERNAME }}/${REPO_NAME}:${TAG}" >> $GITHUB_OUTPUT
+          else
+            # Other workflow_run triggers: use commit SHA as tag (short form to match Docker metadata action)
+            SHORT_SHA=$(echo "${{ github.event.workflow_run.head_sha }}" | cut -c1-7)
+            TAG="sha-${SHORT_SHA}"
+            echo "image_tag=${TAG}" >> $GITHUB_OUTPUT
+            echo "full_image=${{ secrets.DOCKERHUB_USERNAME }}/${REPO_NAME}:${TAG}" >> $GITHUB_OUTPUT
+          fi
+
+      # Extract context variables for all trigger types
+      - name: Extract context variables
+        id: context
+        run: |
+          # Extract common variables based on trigger type
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Manual trigger
+            COMMIT_SHA="${{ github.sha }}"
+            SUBMIT_MSG="Manual Submit: ${{ inputs.image_tag }} (${COMMIT_SHA})"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            # Pull request trigger
+            COMMIT_SHA="${{ github.event.pull_request.head.sha }}"
+            SUBMIT_MSG="PR Submit: ${COMMIT_SHA}"
+          else
+            # Workflow_run trigger
+            COMMIT_SHA="${{ github.event.workflow_run.head_sha }}"
+            SUBMIT_MSG="Auto Submit: ${COMMIT_SHA}"
+          fi
+
+          # Generate short SHA and set outputs
+          SHORT_SHA=$(echo "${COMMIT_SHA}" | cut -c1-7)
+          echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "submit_msg=${SUBMIT_MSG}" >> $GITHUB_OUTPUT
+
+          echo "Context extracted - SHA: ${SHORT_SHA}, Message: ${SUBMIT_MSG}"
+
+      # Setup Node.js environment for Lazycat CLI
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+
+      # Install required tools and dependencies
+      - name: Install dependencies
+        run: |
+          # Install Lazycat CLI globally
+          npm install -g @lazycatcloud/lzc-cli
+          # Install system dependencies for authentication and HTTP requests
+          sudo apt install expect curl -y
+
+      # Authenticate with Lazycat cloud platform
+      - name: Login to Lazycat
+        env:
+          USERNAME: ${{ secrets.LAZYCAT_USERNAME }}
+          PASSWORD: ${{ secrets.LAZYCAT_PASSWORD }}
+        run: |
+          # Use expect script to handle interactive login
+          expect -f .github/workflows/lazycat-login.exp "$USERNAME" "$PASSWORD"
+
+      # Copy Docker image from Docker Hub to Lazycat registry
+      - name: Copy Docker image to Lazycat
+        env:
+          LANG: en_US.UTF-8
+          LC_ALL: en_US.UTF-8
+        run: |
+          echo "Copying Docker image: ${{ steps.docker-info.outputs.full_image }}"
+
+          # Execute copy command and save output while displaying to console
+          set +e  # Don't exit on error immediately
+          lzc-cli appstore copy-image ${{ steps.docker-info.outputs.full_image }} > /tmp/copy_output.log 2>&1
+          COPY_EXIT_CODE=$?
+          set -e  # Resume exit on error
+
+          # Check for copy errors
+          if [ $COPY_EXIT_CODE -ne 0 ] || grep -q "failed to copyimage" /tmp/copy_output.log; then
+            echo "❌ Failed to copy Docker image to Lazycat registry"
+            echo "Copy command output:"
+            cat /tmp/copy_output.log
+            exit 1
+          fi
+
+          # Extract the final Lazycat image URL from the command output
+          # Remove ANSI escape sequences using col -b and extract the last word
+          last_part=$(tail -n 1 /tmp/copy_output.log | col -b | awk '{print $NF}')
+
+          # Replace image placeholder in manifest with actual Lazycat image URL
+          # Use pipe as sed delimiter since Docker image URLs cannot contain pipes
+          sed -i "s|##IMAGE_PLACEHOLDER##|${last_part}|g" lzc-manifest.yml
+
+          echo "Final image URL: ${last_part}"
+
+      # Update version in the LPK manifest file based on trigger type
+      - name: Update version in manifest
+        id: version-info
+        run: |
+          # Define function to extract version from tag
+          extract_version_from_tag() {
+            local tag_name="$1"
+            local source="$2"
+
+            # Use compatible sed syntax to extract version, supports v1.2.3 or v1.2.3-suffix formats
+            local version=$(echo "$tag_name" | sed 's/^v*//' | sed 's/^\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/')
+
+            if echo "$version" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' > /dev/null; then
+              echo "$source: Extracted version ${version} from tag ${tag_name}" >&2
+              echo "$version"
+            else
+              echo "Warning: Tag ${tag_name} does not match expected version format, using default" >&2
+              echo "0.0.1"
+            fi
+          }
+
+          # Use context variables from previous step
+          SHORT_SHA="${{ steps.context.outputs.short_sha }}"
+          COMMIT_REF="${{ steps.context.outputs.commit_sha }}"
+
+          # Determine version based on priority: custom > tag > alpha
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
+            # Priority 1: Custom version for manual trigger
+            VERSION="${{ inputs.version }}"
+            echo "Manual trigger with custom version: ${VERSION}"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            # Priority 2: Direct tag trigger
+            VERSION=$(extract_version_from_tag "${{ github.ref_name }}" "Tag triggered")
+          elif [ "${{ github.event_name }}" = "workflow_run" ] && [[ "${{ github.event.workflow_run.head_branch }}" == v* ]]; then
+            # Priority 3: Workflow_run trigger from tag
+            VERSION=$(extract_version_from_tag "${{ github.event.workflow_run.head_branch }}" "Workflow_run from tag")
+          else
+            # Priority 4: Alpha version with SHA
+            CURRENT_VERSION=$(grep "^version:" lzc-manifest.yml | sed 's/version: *//' | tr -d ' ')
+            BASE_VERSION=$(echo "$CURRENT_VERSION" | sed 's/[+-].*//')
+            VERSION="${BASE_VERSION}-alpha.0+${SHORT_SHA}"
+            echo "Non-tag triggered: Using base version ${BASE_VERSION} with SHA: ${VERSION}"
+          fi
+
+          echo "Setting version to: ${VERSION} (commit: ${SHORT_SHA})"
+          sed -i "s|^version: .*|version: ${VERSION}|I" lzc-manifest.yml
+
+          # Output the version for use in subsequent steps
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      # Build the LPK package and conditionally publish to Lazycat App Store
+      - name: Build and conditionally publish LPK
+        env:
+          # Set locale to avoid potential encoding issues
+          LANG: en_US.UTF-8
+          LC_ALL: en_US.UTF-8
+        run: |
+          # Build the LPK package using Lazycat CLI
+          lzc-cli project build
+          echo "✅ LPK package built successfully!"
+
+          # Check if this is a release version for publishing
+          # Get the version from the previous step output
+          CURRENT_VERSION="${{ steps.version-info.outputs.version }}"
+
+          SHOULD_PUBLISH=false
+          # Check if version matches semantic versioning format (e.g., 1.2.3)
+          # ^[0-9]+\.[0-9]+\.[0-9]+$ matches: start of line, digits, dot, digits, dot, digits, end of line
+          # This excludes alpha/beta versions like 1.2.3-alpha.0 or versions with build metadata like 1.2.3+sha
+          if echo "$CURRENT_VERSION" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' > /dev/null; then
+            echo "Release version detected (${CURRENT_VERSION}) - will publish to app store"
+            SHOULD_PUBLISH=true
+          else
+            echo "Non-release version detected (${CURRENT_VERSION}) - LPK package built but not published to app store"
+          fi
+
+          # Publish to app store only for release versions
+          if [ "$SHOULD_PUBLISH" = "true" ]; then
+            # Use pre-generated submit message from context
+            SUBMIT_MSG="${{ steps.context.outputs.submit_msg }}"
+
+            echo "Publishing LPK package to Lazycat App Store..."
+            # Capture output and exit code to preserve error information
+            set +e  # Don't exit on error immediately
+            lzc-cli appstore publish ./*.lpk -c "$SUBMIT_MSG" | tee /tmp/publish_output.log
+            PUBLISH_EXIT_CODE=$?
+            set -e  # Resume exit on error
+
+            if [ $PUBLISH_EXIT_CODE -ne 0 ]; then
+              echo "❌ LPK package publish failed with exit code: $PUBLISH_EXIT_CODE"
+              exit $PUBLISH_EXIT_CODE
+            fi
+
+            # Check for error status codes in publish output
+            if grep -q "发布应用出错" /tmp/publish_output.log; then
+              echo "❌ LPK package publish failed: Error status code found in output"
+              exit 1
+            fi
+
+            echo "✅ LPK package published successfully to app store!"
+          else
+            echo "ℹ️  LPK package ready but not published (non-tag trigger)"
+          fi
+
+      # Get the generated LPK filename for artifact naming
+      - name: Get LPK filename
+        id: lpk-info
+        run: |
+          LPK_FILE=$(ls ./*.lpk | head -n 1)
+          LPK_BASENAME=$(basename "$LPK_FILE" .lpk)
+          echo "lpk_file=${LPK_FILE}" >> $GITHUB_OUTPUT
+          echo "lpk_basename=${LPK_BASENAME}" >> $GITHUB_OUTPUT
+          echo "Generated LPK file: ${LPK_FILE}"
+          echo "Artifact name will be: ${LPK_BASENAME}"
+
+      # Upload the built LPK file as a GitHub artifact for download
+      - name: Upload LPK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.lpk-info.outputs.lpk_basename }}
+          path: ${{ steps.lpk-info.outputs.lpk_file }}

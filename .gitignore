@@ -1,0 +1,8 @@
+.env
+*.lpk
+dist/
+**/image-sync-server
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/build/
