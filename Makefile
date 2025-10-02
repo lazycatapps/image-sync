@@ -1,4 +1,4 @@
-.PHONY: help build build-backend build-backend-dev build-dist clean-dist build-lpk dev-backend dev-frontend build-local test test-coverage fmt vet lint tidy check clean push deploy-prod deploy-dev-full deploy-backend-dev deploy-frontend deploy-lpk deploy all
+.PHONY: help build build-backend build-backend-dev build-dist clean-dist build-lpk dev-backend dev-frontend build-local test test-coverage fmt vet lint tidy check audit clean push deploy-prod deploy-dev-full deploy-backend-dev deploy-frontend deploy-lpk deploy all
 
 # Default registry and image names
 LAZYCAT_BOX_NAME ?= mybox
@@ -52,6 +52,15 @@ tidy: ##@Development Run go mod tidy
 	cd backend && go mod tidy
 
 check: lint test ##@Development Run lint and tests
+
+audit: ##@Development Scan frontend for security vulnerabilities
+	@echo "Scanning frontend dependencies for vulnerabilities..."
+	@CURRENT_REGISTRY=$$(npm config get registry); \
+	npm config set registry https://registry.npmjs.org/; \
+	cd frontend && npm audit; \
+	AUDIT_EXIT=$$?; \
+	npm config set registry $$CURRENT_REGISTRY; \
+	exit $$AUDIT_EXIT
 
 build: build-backend build-dist ##@Build Build backend image and frontend dist
 
