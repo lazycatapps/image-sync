@@ -195,7 +195,10 @@ services:
     image: ##IMAGE_PLACEHOLDER##
     # image: docker-registry-ui.${LAZYCAT_BOX_NAME}.heiyu.space/image-sync/backend:latest
     # Currently only root can create configs directory and write files
-    user: root
+    user: 65532
+    # Ref: https://developer.lazycat.cloud/advanced-setupscript.html
+    setup_script: |
+      chown -R 65532:65532 /configs
     environment:
       # 服务监听配置
       - SYNC_HOST=host.lzcapp
