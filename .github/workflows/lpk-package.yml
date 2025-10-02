@@ -207,8 +207,8 @@ jobs:
           # Output the version for use in subsequent steps
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
-      # Build the LPK package and conditionally publish to Lazycat App Store
-      - name: Build and conditionally publish LPK
+      # Build the LPK package
+      - name: Build LPK package
         env:
           # Set locale to avoid potential encoding issues
           LANG: en_US.UTF-8
@@ -218,6 +218,30 @@ jobs:
           lzc-cli project build
           echo "✅ LPK package built successfully!"
 
+      # Get the generated LPK filename for artifact naming
+      - name: Get LPK filename
+        id: lpk-info
+        run: |
+          LPK_FILE=$(ls ./*.lpk | head -n 1)
+          LPK_BASENAME=$(basename "$LPK_FILE" .lpk)
+          echo "lpk_file=${LPK_FILE}" >> $GITHUB_OUTPUT
+          echo "lpk_basename=${LPK_BASENAME}" >> $GITHUB_OUTPUT
+          echo "Generated LPK file: ${LPK_FILE}"
+          echo "Artifact name will be: ${LPK_BASENAME}"
+
+      # Upload the built LPK file as a GitHub artifact for download
+      - name: Upload LPK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.lpk-info.outputs.lpk_basename }}
+          path: ${{ steps.lpk-info.outputs.lpk_file }}
+
+      # Conditionally publish LPK to Lazycat App Store
+      - name: Publish LPK to App Store
+        env:
+          LANG: en_US.UTF-8
+          LC_ALL: en_US.UTF-8
+        run: |
           # Check if this is a release version for publishing
           # Get the version from the previous step output
           CURRENT_VERSION="${{ steps.version-info.outputs.version }}"
@@ -260,21 +284,3 @@ jobs:
           else
             echo "ℹ️  LPK package ready but not published (non-tag trigger)"
           fi
-
-      # Get the generated LPK filename for artifact naming
-      - name: Get LPK filename
-        id: lpk-info
-        run: |
-          LPK_FILE=$(ls ./*.lpk | head -n 1)
-          LPK_BASENAME=$(basename "$LPK_FILE" .lpk)
-          echo "lpk_file=${LPK_FILE}" >> $GITHUB_OUTPUT
-          echo "lpk_basename=${LPK_BASENAME}" >> $GITHUB_OUTPUT
-          echo "Generated LPK file: ${LPK_FILE}"
-          echo "Artifact name will be: ${LPK_BASENAME}"
-
-      # Upload the built LPK file as a GitHub artifact for download
-      - name: Upload LPK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.lpk-info.outputs.lpk_basename }}
-          path: ${{ steps.lpk-info.outputs.lpk_file }}
