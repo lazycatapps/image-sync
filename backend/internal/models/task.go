@@ -130,6 +130,7 @@ type SyncRequest struct {
 	Architecture   string `json:"architecture"`                   // Target architecture (optional, default: "all")
 	SrcTLSVerify   *bool  `json:"srcTlsVerify"`                   // Source TLS verification (optional, default: false)
 	DestTLSVerify  *bool  `json:"destTlsVerify"`                  // Destination TLS verification (optional, default: false)
+	RetryTimes     *int   `json:"retryTimes"`                     // Retry times for network failures (optional, default: 3)
 }
 
 // InspectRequest represents the request body for inspecting an image.

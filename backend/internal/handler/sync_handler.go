@@ -68,6 +68,7 @@ func (h *SyncHandler) SyncImage(c *gin.Context) {
 	var req models.SyncRequest
 
 	if err := c.ShouldBindJSON(&req); err != nil {
+		h.logger.Error("Failed to bind JSON request: %v", err)
 		h.handleError(c, apperrors.WrapInvalidInput(err, "Invalid request body"))
 		return
 	}
@@ -95,6 +96,11 @@ func (h *SyncHandler) SyncImage(c *gin.Context) {
 
 	if err := validator.ValidateCredentials(req.DestUsername, req.DestPassword); err != nil {
 		h.handleError(c, apperrors.WrapInvalidInput(err, "Invalid destination credentials"))
+		return
+	}
+
+	if err := validator.ValidateRetryTimes(req.RetryTimes); err != nil {
+		h.handleError(c, apperrors.WrapInvalidInput(err, "Invalid retry times"))
 		return
 	}
 

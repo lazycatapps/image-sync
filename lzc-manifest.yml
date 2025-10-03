@@ -1,7 +1,7 @@
 # app 的唯一 id,上架到商店需要保证不要冲突,尽量使用开发者自己的域名作为后缀.
 package: cloud.lazycat.app.liu.imagesync
 # app 的版本
-version: 0.0.1
+version: 0.0.2
 
 name: Image Sync
 keyword: docker, image, snyc
@@ -182,20 +182,14 @@ application:
   multi_instance: false
 
 services:
-  # init:
-  #   image: ##IMAGE_PLACEHOLDER##
-  #   # image: docker-registry-ui.${LAZYCAT_BOX_NAME}.heiyu.space/image-sync/backend:latest
-  #   user: root
-  #   binds:
-  #     - /lzcapp/var/configs:/configs
-  #   entrypoint: /bin/sh
-  #   command: -c "chown -R 65532:65532 /configs"
-
   backend:
     image: ##IMAGE_PLACEHOLDER##
     # image: docker-registry-ui.${LAZYCAT_BOX_NAME}.heiyu.space/image-sync/backend:latest
     # Currently only root can create configs directory and write files
-    user: root
+    user: 65532
+    # Ref: https://developer.lazycat.cloud/advanced-setupscript.html
+    setup_script: |
+      chown -R 65532:65532 /configs
     environment:
       # 服务监听配置
       - SYNC_HOST=host.lzcapp

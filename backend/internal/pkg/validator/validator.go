@@ -224,3 +224,20 @@ func ValidateConfigName(name string) error {
 
 	return nil
 }
+
+// ValidateRetryTimes validates retry times parameter.
+// Allows 0-100 retries.
+func ValidateRetryTimes(retryTimes *int) error {
+	if retryTimes == nil {
+		return nil // Optional parameter
+	}
+
+	if *retryTimes < 0 || *retryTimes > 100 {
+		return &ValidationError{
+			Field:   "retryTimes",
+			Message: "retry times must be between 0 and 100",
+		}
+	}
+
+	return nil
+}

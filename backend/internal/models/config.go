@@ -14,4 +14,5 @@ type UserConfig struct {
 	DestPassword   string `json:"destPassword"`   // Destination registry password (base64 encoded)
 	SrcTLSVerify   bool   `json:"srcTLSVerify"`   // Source TLS verification
 	DestTLSVerify  bool   `json:"destTLSVerify"`  // Destination TLS verification
+	RetryTimes     int    `json:"retryTimes"`     // Network retry times (0-100)
 }

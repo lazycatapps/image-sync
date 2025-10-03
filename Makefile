@@ -1,4 +1,4 @@
-.PHONY: help build build-backend build-backend-dev build-dist clean-dist build-lpk dev-backend dev-frontend build-local test test-coverage fmt vet lint tidy check clean push deploy-prod deploy-dev-full deploy-backend-dev deploy-frontend deploy-lpk deploy all
+.PHONY: help build build-backend build-backend-dev build-dist clean-dist build-lpk dev-backend dev-frontend build-local test test-coverage fmt vet lint tidy check audit clean push deploy-prod deploy-dev-full deploy-backend-dev deploy-frontend deploy-lpk deploy all
 
 # Default registry and image names
 LAZYCAT_BOX_NAME ?= mybox
@@ -27,6 +27,7 @@ dev-backend: ##@Development Run backend locally for development
 	cd backend && \
 	export DEFAULT_SOURCE_REGISTRY="$(DEFAULT_SOURCE_REGISTRY)" && \
 	export DEFAULT_DEST_REGISTRY="$(DEFAULT_DEST_REGISTRY)" && \
+	export TRIVY_ALLOW_PASSWORD_SAVE="true" && \
 	go run cmd/server/main.go
 
 dev-frontend: ##@Development Run frontend locally for development
@@ -53,16 +54,25 @@ tidy: ##@Development Run go mod tidy
 
 check: lint test ##@Development Run lint and tests
 
+audit: ##@Development Scan frontend for security vulnerabilities
+	@echo "Scanning frontend dependencies for vulnerabilities..."
+	@CURRENT_REGISTRY=$$(npm config get registry); \
+	npm config set registry https://registry.npmjs.org/; \
+	cd frontend && npm audit; \
+	AUDIT_EXIT=$$?; \
+	npm config set registry $$CURRENT_REGISTRY; \
+	exit $$AUDIT_EXIT
+
 build: build-backend build-dist ##@Build Build backend image and frontend dist
 
 build-backend: ##@Build Build backend Docker image (production)
 	@echo "Building backend image: $(BACKEND_IMAGE):$(VERSION) for platform $(PLATFORM)"
-	cd backend && docker build --platform $(PLATFORM) -t $(BACKEND_IMAGE):$(VERSION) .
+	cd backend && docker build --platform $(PLATFORM) --target prod -t $(BACKEND_IMAGE):$(VERSION) .
 	@echo "Backend image built successfully!"
 
 build-backend-dev: build-local ##@Build Build backend Docker image (development with local binary)
 	@echo "Building backend dev image: $(BACKEND_IMAGE):${VERSION} for platform $(PLATFORM)"
-	cd backend && docker build --platform $(PLATFORM) -f Dockerfile.dev -t $(BACKEND_IMAGE):${VERSION} .
+	cd backend && docker build --platform $(PLATFORM) --target dev -t $(BACKEND_IMAGE):${VERSION} .
 	@echo "Backend dev image built successfully!"
 
 build-dist: ##@Build Build frontend into dist directory

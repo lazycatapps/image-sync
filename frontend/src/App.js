@@ -2,8 +2,8 @@
 // Licensed under the MIT License. See LICENSE file in the project root for details.
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Form, Input, Button, Card, Space, Typography, Select, Tag, Checkbox, Modal, Alert, Collapse, FloatButton, App as AntApp } from 'antd';
-import { InfoCircleOutlined, BugOutlined, CopyOutlined } from '@ant-design/icons';
+import { Form, Input, InputNumber, Button, Card, Space, Typography, Select, Tag, Checkbox, Modal, Alert, Collapse, FloatButton, App as AntApp } from 'antd';
+import { InfoCircleOutlined, BugOutlined, CopyOutlined, FullscreenOutlined, FullscreenExitOutlined } from '@ant-design/icons';
 import 'antd/dist/reset.css';
 import './App.css';
 
@@ -51,6 +51,7 @@ function AppContent() {
   const [deleteConfigModalVisible, setDeleteConfigModalVisible] = useState(false);
   const [configNameInput, setConfigNameInput] = useState('');
   const [debugEnabled, setDebugEnabled] = useState(false);
+  const [logsModalMaximized, setLogsModalMaximized] = useState(false);
   const [form] = Form.useForm();
   const eventSourceRef = useRef(null);
   const statusIntervalRef = useRef(null);
@@ -162,6 +163,7 @@ function AppContent() {
           destPassword: '',
           srcTlsVerify: true,
           destTlsVerify: true,
+          retryTimes: 3,
         };
 
         if (data) {
@@ -180,6 +182,7 @@ function AppContent() {
 
           if (data.srcTLSVerify !== undefined) formValues.srcTlsVerify = data.srcTLSVerify;
           if (data.destTLSVerify !== undefined) formValues.destTlsVerify = data.destTLSVerify;
+          if (data.retryTimes !== undefined) formValues.retryTimes = data.retryTimes;
         }
 
         form.setFieldsValue(formValues);
@@ -223,7 +226,10 @@ function AppContent() {
       .then(data => {
         addDebugLog('FETCH', 'Env defaults data:', data);
         if (data.sourceRegistry || data.destRegistry) {
+          // Preserve existing field values when setting env defaults
+          const currentValues = form.getFieldsValue();
           form.setFieldsValue({
+            ...currentValues,
             sourceImage: data.sourceRegistry || '',
             destImage: data.destRegistry || '',
           });
@@ -443,13 +449,29 @@ function AppContent() {
       const url = `${BACKEND_API_URL}/api/v1/sync`;
       addDebugLog('SYNC', 'Sending sync request to:', url);
 
+      // Ensure correct data types for backend
+      const payload = {
+        sourceImage: values.sourceImage || '',
+        destImage: values.destImage || '',
+        architecture: values.architecture || 'all',
+        sourceUsername: values.sourceUsername || '',
+        sourcePassword: values.sourcePassword || '',
+        destUsername: values.destUsername || '',
+        destPassword: values.destPassword || '',
+        srcTlsVerify: values.srcTlsVerify !== undefined ? values.srcTlsVerify : true,
+        destTlsVerify: values.destTlsVerify !== undefined ? values.destTlsVerify : true,
+        retryTimes: typeof values.retryTimes === 'number' ? parseInt(values.retryTimes, 10) : 3,
+      };
+
+      addDebugLog('SYNC', 'Payload prepared:', { ...payload, sourcePassword: '***', destPassword: '***' });
+
       const response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         credentials: 'include',
-        body: JSON.stringify(values),
+        body: JSON.stringify(payload),
       });
 
       addDebugLog('SYNC', 'Sync response received:', { status: response.status, ok: response.ok });
@@ -532,6 +554,7 @@ function AppContent() {
         destPassword: values.destPassword ? btoa(values.destPassword) : '',
         srcTLSVerify: values.srcTlsVerify !== undefined ? values.srcTlsVerify : true,
         destTLSVerify: values.destTlsVerify !== undefined ? values.destTlsVerify : true,
+        retryTimes: typeof values.retryTimes === 'number' ? parseInt(values.retryTimes, 10) : 3,
       };
 
       const response = await fetch(`${BACKEND_API_URL}/api/v1/config/${encodeURIComponent(name)}`, {
@@ -643,6 +666,26 @@ function AppContent() {
       .catch(err => {
         message.error('复制失败');
         addDebugLog('ERROR', `Copy failed for ${fieldName}:`, err.message);
+      });
+  };
+
+  // Copy sync logs to clipboard
+  const handleCopySyncLogs = () => {
+    if (syncLogs.length === 0) {
+      message.warning('日志为空，无法复制');
+      addDebugLog('COPY', 'Copy sync logs failed: logs are empty');
+      return;
+    }
+
+    const logsText = syncLogs.join('\n');
+    navigator.clipboard.writeText(logsText)
+      .then(() => {
+        message.success('日志已复制到剪贴板');
+        addDebugLog('COPY', `Copied sync logs: ${syncLogs.length} lines`);
+      })
+      .catch(err => {
+        message.error('复制日志失败');
+        addDebugLog('ERROR', 'Copy sync logs failed:', err.message);
       });
   };
 
@@ -890,6 +933,15 @@ function AppContent() {
                   label: '高级选项',
                   children: (
                     <Space direction="vertical" style={{ width: '100%' }}>
+                      <Form.Item
+                        label="网络重试次数"
+                        name="retryTimes"
+                        initialValue={3}
+                        style={{ maxWidth: '200px', marginBottom: '16px' }}
+                        tooltip="当遇到网络超时等错误时，Skopeo 自动重试的次数（建议 1-10）"
+                      >
+                        <InputNumber min={0} max={100} placeholder="默认 3 次" style={{ width: '100%' }} />
+                      </Form.Item>
                       <Alert
                         message="配置管理说明"
                         description="您可以保存多份配置，并通过下拉框快速切换。配置信息（包括密码）会以加密方式保存在服务器端，仅限您本人访问。"
@@ -1004,7 +1056,29 @@ function AppContent() {
         </Modal>
 
         <Modal
-          title="同步日志"
+          title={
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span>同步日志</span>
+              <div>
+                <Button
+                  type="text"
+                  icon={<CopyOutlined />}
+                  onClick={handleCopySyncLogs}
+                  style={{ marginRight: '8px' }}
+                >
+                  复制
+                </Button>
+                <Button
+                  type="text"
+                  icon={logsModalMaximized ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
+                  onClick={() => setLogsModalMaximized(!logsModalMaximized)}
+                  style={{ marginRight: '24px' }}
+                >
+                  {logsModalMaximized ? '恢复' : '最大化'}
+                </Button>
+              </div>
+            </div>
+          }
           open={logsModalVisible}
           onCancel={handleCloseModal}
           footer={[
@@ -1012,7 +1086,8 @@ function AppContent() {
               关闭
             </Button>
           ]}
-          width={800}
+          width={logsModalMaximized ? '96vw' : 800}
+          style={logsModalMaximized ? { top: 20, maxWidth: 'none', paddingBottom: 20 } : {}}
         >
           {syncStatus && (
             <Alert
@@ -1028,7 +1103,7 @@ function AppContent() {
             borderRadius: '4px',
             fontFamily: 'monospace',
             fontSize: '12px',
-            maxHeight: '500px',
+            maxHeight: logsModalMaximized ? 'calc(96vh - 200px)' : '500px',
             overflowY: 'auto'
           }}>
             {syncLogs.map((log, index) => (

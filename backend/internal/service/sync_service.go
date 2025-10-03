@@ -7,8 +7,11 @@ package service
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -88,6 +91,23 @@ func (s *syncService) ExecuteSync(taskID string, req *models.SyncRequest) error 
 
 	task.AddLog(fmt.Sprintf("Task started at %s", time.Now().Format(time.RFC3339)))
 
+	// Create temporary auth file if credentials are provided
+	authFile, err := createAuthFile(
+		req.SourceImage, req.SourceUsername, req.SourcePassword,
+		req.DestImage, req.DestUsername, req.DestPassword,
+	)
+	if err != nil {
+		return s.handleTaskError(task, "Failed to create auth file", err)
+	}
+	// Ensure auth file is deleted after use
+	if authFile != "" {
+		defer func() {
+			if err := os.Remove(authFile); err != nil {
+				s.logger.Error("[%s] Failed to remove auth file: %v", taskID, err)
+			}
+		}()
+	}
+
 	// Build skopeo command arguments
 	args := s.buildSkopeoArgs(task, req)
 
@@ -102,6 +122,11 @@ func (s *syncService) ExecuteSync(taskID string, req *models.SyncRequest) error 
 
 	// Execute skopeo command
 	cmd := exec.CommandContext(ctx, "skopeo", args...)
+
+	// Set REGISTRY_AUTH_FILE environment variable if auth file exists
+	if authFile != "" {
+		cmd.Env = append(os.Environ(), fmt.Sprintf("REGISTRY_AUTH_FILE=%s", authFile))
+	}
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -187,6 +212,13 @@ func (s *syncService) ExecuteSync(taskID string, req *models.SyncRequest) error 
 func (s *syncService) buildSkopeoArgs(task *models.SyncTask, req *models.SyncRequest) []string {
 	args := []string{"copy"}
 
+	// Add retry mechanism for network failures
+	retryTimes := 3
+	if req.RetryTimes != nil {
+		retryTimes = *req.RetryTimes
+	}
+	args = append(args, "--retry-times", fmt.Sprintf("%d", retryTimes))
+
 	// Add TLS verification flags
 	srcTLSVerify := true
 	if req.SrcTLSVerify != nil {
@@ -200,15 +232,12 @@ func (s *syncService) buildSkopeoArgs(task *models.SyncTask, req *models.SyncReq
 	args = append(args, fmt.Sprintf("--src-tls-verify=%v", srcTLSVerify))
 	args = append(args, fmt.Sprintf("--dest-tls-verify=%v", destTLSVerify))
 
-	// Add source registry credentials if provided
+	// Credentials are now handled via REGISTRY_AUTH_FILE environment variable
+	// No longer adding --src-creds or --dest-creds to command line
 	if req.SourceUsername != "" && req.SourcePassword != "" {
-		args = append(args, "--src-creds", fmt.Sprintf("%s:%s", req.SourceUsername, req.SourcePassword))
 		task.AddLog("Using source credentials")
 	}
-
-	// Add destination registry credentials if provided
 	if req.DestUsername != "" && req.DestPassword != "" {
-		args = append(args, "--dest-creds", fmt.Sprintf("%s:%s", req.DestUsername, req.DestPassword))
 		task.AddLog("Using destination credentials")
 	}
 
@@ -412,4 +441,88 @@ func sanitizeCommand(args []string) string {
 		}
 	}
 	return "skopeo " + strings.Join(sanitized, " ")
+}
+
+// extractRegistry extracts the registry domain from an image URL.
+// Examples:
+//   - "docker.io/library/nginx:latest" -> "docker.io"
+//   - "registry.example.com:5000/myapp" -> "registry.example.com:5000"
+//   - "demo.goharbor.io/devops/controller:v1" -> "demo.goharbor.io"
+func extractRegistry(imageURL string) string {
+	// Remove "docker://" prefix if present
+	imageURL = strings.TrimPrefix(imageURL, "docker://")
+
+	// Split by "/" to get the first part
+	parts := strings.Split(imageURL, "/")
+	if len(parts) == 0 {
+		return ""
+	}
+
+	// The first part is the registry (may include port)
+	registry := parts[0]
+
+	// If the first part doesn't contain a "." or ":", it's likely just the image name (e.g., "nginx")
+	// In this case, default to "docker.io"
+	if !strings.Contains(registry, ".") && !strings.Contains(registry, ":") {
+		return "docker.io"
+	}
+
+	return registry
+}
+
+// createAuthFile creates a temporary Docker-compatible auth file for skopeo.
+// It returns the file path and an error if any.
+// The caller is responsible for deleting the file after use.
+func createAuthFile(sourceImage, sourceUsername, sourcePassword, destImage, destUsername, destPassword string) (string, error) {
+	// Build auth config
+	authConfig := map[string]interface{}{
+		"auths": map[string]interface{}{},
+	}
+
+	auths := authConfig["auths"].(map[string]interface{})
+
+	// Add source registry credentials if provided
+	if sourceUsername != "" && sourcePassword != "" {
+		sourceRegistry := extractRegistry(sourceImage)
+		authStr := base64.StdEncoding.EncodeToString([]byte(sourceUsername + ":" + sourcePassword))
+		auths[sourceRegistry] = map[string]string{
+			"auth": authStr,
+		}
+	}
+
+	// Add destination registry credentials if provided
+	if destUsername != "" && destPassword != "" {
+		destRegistry := extractRegistry(destImage)
+		authStr := base64.StdEncoding.EncodeToString([]byte(destUsername + ":" + destPassword))
+		auths[destRegistry] = map[string]string{
+			"auth": authStr,
+		}
+	}
+
+	// If no credentials provided, return empty string (no auth file needed)
+	if len(auths) == 0 {
+		return "", nil
+	}
+
+	// Create temporary file
+	tmpFile, err := os.CreateTemp("", "skopeo-auth-*.json")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp auth file: %w", err)
+	}
+	defer tmpFile.Close()
+
+	// Set restrictive permissions (0600 = rw-------)
+	if err := os.Chmod(tmpFile.Name(), 0600); err != nil {
+		os.Remove(tmpFile.Name())
+		return "", fmt.Errorf("failed to set auth file permissions: %w", err)
+	}
+
+	// Write auth config to file
+	encoder := json.NewEncoder(tmpFile)
+	if err := encoder.Encode(authConfig); err != nil {
+		os.Remove(tmpFile.Name())
+		return "", fmt.Errorf("failed to write auth file: %w", err)
+	}
+
+	return tmpFile.Name(), nil
 }

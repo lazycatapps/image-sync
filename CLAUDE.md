@@ -339,6 +339,11 @@ Image Sync 是一个基于 Skopeo 的容器镜像同步工具，提供简洁的 
   - 可通过环境变量 `SYNC_TIMEOUT` 指定 (单位:秒)
   - 使用 `context.WithTimeout()` 实现
   - 超时后自动终止 skopeo 进程,任务标记为失败
+- **重试机制**:
+  - 默认重试次数: 3 次
+  - 前端可配置重试次数 (0-100 次)
+  - 使用 Skopeo 的 `--retry-times` 参数
+  - 适用于网络不稳定或临时性错误
 - **进程管理**:
   - 任务在 goroutine 中异步执行
   - 进程输出通过 pipe 实时读取

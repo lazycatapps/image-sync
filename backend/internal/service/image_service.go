@@ -5,8 +5,10 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -37,6 +39,21 @@ func NewImageService(logger logger.Logger) ImageService {
 // InspectImage uses skopeo to fetch image manifest and extract available architectures.
 // It supports both multi-arch manifest lists and single-arch manifests.
 func (s *imageService) InspectImage(req *models.InspectRequest) (*models.InspectResponse, error) {
+	// Create temporary auth file if credentials are provided
+	authFile, err := createAuthFileForInspect(req.Image, req.Username, req.Password)
+	if err != nil {
+		s.logger.Error("Failed to create auth file for %s: %v", req.Image, err)
+		return nil, fmt.Errorf("failed to create auth file: %w", err)
+	}
+	// Ensure auth file is deleted after use
+	if authFile != "" {
+		defer func() {
+			if err := os.Remove(authFile); err != nil {
+				s.logger.Error("Failed to remove auth file: %v", err)
+			}
+		}()
+	}
+
 	args := []string{"inspect", "--raw"}
 
 	// Add TLS verification flag
@@ -46,10 +63,8 @@ func (s *imageService) InspectImage(req *models.InspectRequest) (*models.Inspect
 	}
 	args = append(args, fmt.Sprintf("--tls-verify=%v", tlsVerify))
 
-	// Add credentials if provided
-	if req.Username != "" && req.Password != "" {
-		args = append(args, "--creds", fmt.Sprintf("%s:%s", req.Username, req.Password))
-	}
+	// Credentials are now handled via REGISTRY_AUTH_FILE environment variable
+	// No longer adding --creds to command line
 
 	args = append(args, fmt.Sprintf("docker://%s", req.Image))
 
@@ -60,6 +75,12 @@ func (s *imageService) InspectImage(req *models.InspectRequest) (*models.Inspect
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "skopeo", args...)
+
+	// Set REGISTRY_AUTH_FILE environment variable if auth file exists
+	if authFile != "" {
+		cmd.Env = append(os.Environ(), fmt.Sprintf("REGISTRY_AUTH_FILE=%s", authFile))
+	}
+
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		s.logger.Error("Image inspection timed out after %s", imageInspectTimeout)
@@ -120,4 +141,71 @@ func (s *imageService) extractArchitectures(inspectResult map[string]interface{}
 	}
 
 	return architectures
+}
+
+// extractRegistryForInspect extracts the registry domain from an image URL.
+// This is a duplicate of the function in sync_service.go for image inspection.
+func extractRegistryForInspect(imageURL string) string {
+	// Remove "docker://" prefix if present
+	imageURL = strings.TrimPrefix(imageURL, "docker://")
+
+	// Split by "/" to get the first part
+	parts := strings.Split(imageURL, "/")
+	if len(parts) == 0 {
+		return ""
+	}
+
+	// The first part is the registry (may include port)
+	registry := parts[0]
+
+	// If the first part doesn't contain a "." or ":", it's likely just the image name (e.g., "nginx")
+	// In this case, default to "docker.io"
+	if !strings.Contains(registry, ".") && !strings.Contains(registry, ":") {
+		return "docker.io"
+	}
+
+	return registry
+}
+
+// createAuthFileForInspect creates a temporary Docker-compatible auth file for skopeo inspect.
+// It returns the file path and an error if any.
+// The caller is responsible for deleting the file after use.
+func createAuthFileForInspect(image, username, password string) (string, error) {
+	// If no credentials provided, return empty string (no auth file needed)
+	if username == "" || password == "" {
+		return "", nil
+	}
+
+	// Build auth config
+	authConfig := map[string]interface{}{
+		"auths": map[string]interface{}{},
+	}
+
+	registry := extractRegistryForInspect(image)
+	authStr := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+	authConfig["auths"].(map[string]interface{})[registry] = map[string]string{
+		"auth": authStr,
+	}
+
+	// Create temporary file
+	tmpFile, err := os.CreateTemp("", "skopeo-auth-*.json")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp auth file: %w", err)
+	}
+	defer tmpFile.Close()
+
+	// Set restrictive permissions (0600 = rw-------)
+	if err := os.Chmod(tmpFile.Name(), 0600); err != nil {
+		os.Remove(tmpFile.Name())
+		return "", fmt.Errorf("failed to set auth file permissions: %w", err)
+	}
+
+	// Write auth config to file
+	encoder := json.NewEncoder(tmpFile)
+	if err := encoder.Encode(authConfig); err != nil {
+		os.Remove(tmpFile.Name())
+		return "", fmt.Errorf("failed to write auth file: %w", err)
+	}
+
+	return tmpFile.Name(), nil
 }
