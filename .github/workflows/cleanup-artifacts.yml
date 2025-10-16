@@ -12,6 +12,11 @@ on:
         required: false
         default: '15'
         type: string
+      keep_recent_count:
+        description: 'Number of most recent artifacts to always keep'
+        required: false
+        default: '3'
+        type: string
       dry_run:
         description: 'Dry run mode (only show what would be deleted)'
         required: false
@@ -22,9 +27,6 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
 
-    # Security: Only run on main repository, not forks
-    if: github.repository_owner == 'lazycatapps'
-
     steps:
       - name: Cleanup old artifacts
         env:
@@ -33,11 +35,13 @@ jobs:
         run: |
           # 设置保留天数
           RETENTION_DAYS=${{ inputs.retention_days || '15' }}
+          KEEP_RECENT_COUNT=${{ inputs.keep_recent_count || '3' }}
           DRY_RUN=${{ inputs.dry_run || 'false' }}
 
           echo "=== DEBUG INFO ==="
           echo "Repository: ${REPO}"
           echo "Retention days: ${RETENTION_DAYS}"
+          echo "Keep recent count: ${KEEP_RECENT_COUNT}"
           echo "Dry run mode: ${DRY_RUN}"
           echo "=================="
 
@@ -45,14 +49,18 @@ jobs:
           CUTOFF_DATE=$(date -u -d "${RETENTION_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-${RETENTION_DAYS}d +%Y-%m-%dT%H:%M:%SZ)
           echo "Cutoff date: ${CUTOFF_DATE}"
 
-          # 获取所有 artifacts (按创建时间升序排序，最早的在前)
+          # 获取所有 artifacts (按创建时间降序排序，最新的在前)
           echo "Fetching artifacts..."
-          ARTIFACTS=$(gh api repos/${REPO}/actions/artifacts --paginate --jq '.artifacts | sort_by(.created_at) | .[] | {id: .id, name: .name, created_at: .created_at, size_in_bytes: .size_in_bytes}')
+          ARTIFACTS=$(gh api repos/${REPO}/actions/artifacts --paginate --jq '.artifacts | sort_by(.created_at) | reverse | .[] | {id: .id, name: .name, created_at: .created_at, size_in_bytes: .size_in_bytes}')
 
           if [ -z "$ARTIFACTS" ]; then
             echo "No artifacts found"
             exit 0
           fi
+
+          # 创建临时文件存储所有 artifacts
+          TEMP_FILE=$(mktemp)
+          echo "$ARTIFACTS" > "$TEMP_FILE"
 
           TOTAL_COUNT=0
           TOTAL_SIZE=0
@@ -60,27 +68,40 @@ jobs:
           DELETE_SIZE=0
           SUCCESS_COUNT=0
           FAILED_COUNT=0
+          KEEP_COUNT=0
+          KEEP_SIZE=0
 
           # 统计所有 artifacts
           while IFS= read -r artifact; do
             TOTAL_COUNT=$((TOTAL_COUNT + 1))
             SIZE=$(echo "$artifact" | jq -r '.size_in_bytes')
             TOTAL_SIZE=$((TOTAL_SIZE + SIZE))
-          done <<< "$ARTIFACTS"
+          done < "$TEMP_FILE"
 
           echo "Total artifacts: ${TOTAL_COUNT}"
           echo "Total size: $(numfmt --to=iec-i --suffix=B ${TOTAL_SIZE} 2>/dev/null || echo "${TOTAL_SIZE} bytes")"
+          echo "Will keep at least ${KEEP_RECENT_COUNT} most recent artifacts"
 
-          # 删除过期的 artifacts
+          # 删除过期的 artifacts (但保留最近的 N 个)
           echo ""
           echo "Processing artifacts..."
+          INDEX=0
           while IFS= read -r artifact; do
+            INDEX=$((INDEX + 1))
             ID=$(echo "$artifact" | jq -r '.id')
             NAME=$(echo "$artifact" | jq -r '.name')
             CREATED=$(echo "$artifact" | jq -r '.created_at')
             SIZE=$(echo "$artifact" | jq -r '.size_in_bytes')
 
-            # 比较日期
+            # 前 N 个(最新的)始终保留
+            if [ $INDEX -le $KEEP_RECENT_COUNT ]; then
+              echo "Keeping recent artifact #${INDEX}: ${NAME} (created: ${CREATED}, size: $(numfmt --to=iec-i --suffix=B ${SIZE} 2>/dev/null || echo "${SIZE} bytes"))"
+              KEEP_COUNT=$((KEEP_COUNT + 1))
+              KEEP_SIZE=$((KEEP_SIZE + SIZE))
+              continue
+            fi
+
+            # 对于其他的 artifacts，检查是否超过保留期
             if [[ "$CREATED" < "$CUTOFF_DATE" ]]; then
               DELETE_COUNT=$((DELETE_COUNT + 1))
               DELETE_SIZE=$((DELETE_SIZE + SIZE))
@@ -103,8 +124,15 @@ jobs:
                 # 添加延迟避免速率限制
                 sleep 0.5
               fi
+            else
+              echo "Keeping artifact (within retention): ${NAME} (created: ${CREATED}, size: $(numfmt --to=iec-i --suffix=B ${SIZE} 2>/dev/null || echo "${SIZE} bytes"))"
+              KEEP_COUNT=$((KEEP_COUNT + 1))
+              KEEP_SIZE=$((KEEP_SIZE + SIZE))
             fi
-          done <<< "$ARTIFACTS"
+          done < "$TEMP_FILE"
+
+          # 清理临时文件
+          rm -f "$TEMP_FILE"
 
           echo ""
           echo "=== CLEANUP SUMMARY ==="
@@ -113,6 +141,8 @@ jobs:
           fi
           echo "Total artifacts: ${TOTAL_COUNT}"
           echo "Total size: $(numfmt --to=iec-i --suffix=B ${TOTAL_SIZE} 2>/dev/null || echo "${TOTAL_SIZE} bytes")"
+          echo "Kept artifacts: ${KEEP_COUNT}"
+          echo "Kept size: $(numfmt --to=iec-i --suffix=B ${KEEP_SIZE} 2>/dev/null || echo "${KEEP_SIZE} bytes")"
           echo "Artifacts to delete: ${DELETE_COUNT}"
           echo "Size to free: $(numfmt --to=iec-i --suffix=B ${DELETE_SIZE} 2>/dev/null || echo "${DELETE_SIZE} bytes")"
           if [ "$DRY_RUN" = "true" ]; then

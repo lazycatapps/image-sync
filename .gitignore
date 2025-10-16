@@ -1,8 +1,52 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build artifacts
+bin/
+dist/
+build/
+*.out
+coverage.out
+coverage.html
+htmlcov/
+
+# Dependencies
+node_modules/
+vendor/
+
+# Environment files
+.env
+.env.local
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Custom ignores
 .env
 *.lpk
-dist/
-**/image-sync-server
+docker-compose.yml
+docker-compose.yaml
+docker-run.sh
+publish.tips.md
+.lzc-dtl-cache.json
 
-# Frontend build artifacts
-frontend/node_modules/
+**/dist/
+**/node_modules/
+
+# Add project-specific ignores below this line
 frontend/build/
+**/image-sync-server

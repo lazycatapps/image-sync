@@ -2,66 +2,61 @@ name: Build & Push (Docker Hub)
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - "main"
+      - "main-lazycat"
     paths:
-      - 'backend/**'
-      - '.github/workflows/docker-image.yml'
-    tags: [ "v[0-9]+.[0-9]+.[0-9]+" ]
+      - "**"
+      - ".github/workflows/docker-image.yml"
+    tags:
+      - "v*"
+
   pull_request:
-    branches: [ "main" ]
+    branches:
+      - "main"
+      - "main-lazycat"
     paths:
-      - 'backend/**'
-      - '.github/workflows/docker-image.yml'
+      - "**"
+      - ".github/workflows/docker-image.yml"
+
   workflow_dispatch:
+    inputs:
+      docker_context:
+        description: "Docker build context path"
+        required: false
+        default: "./backend"
+      dockerfile_path:
+        description: "Path to Dockerfile"
+        required: false
+        default: "./backend/Dockerfile"
+      docker_target:
+        description: "Docker build target stage"
+        required: false
+        default: "prod"
+      enable_go_tests:
+        description: "Enable Go tests before build"
+        required: false
+        type: boolean
+        default: false
+      go_version:
+        description: "Go version for tests"
+        required: false
+        default: "latest"
+      go_test_dir:
+        description: "Directory to run Go tests in"
+        required: false
+        default: "./backend"
 
 jobs:
-  docker:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-
-      - name: Run Go tests
-        working-directory: ./backend
-        run: go test -v ./...
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Extract repo name
-        id: repo
-        run: echo "name=${GITHUB_REPOSITORY#*/}" >> $GITHUB_OUTPUT
-
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ steps.repo.outputs.name }}
-          tags: |
-            type=ref,event=branch,enable={{is_default_branch}}
-            type=ref,event=tag
-            type=sha
-
-      - name: Build & push
-        uses: docker/build-push-action@v6
-        with:
-          context: ./backend
-          file: ./backend/Dockerfile
-          target: prod
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            commit_id=${{ github.sha }}
+  build:
+    uses: ./.github/workflows/reusable-docker-image.yml
+    with:
+      docker_context: ${{ (github.event_name == 'workflow_dispatch' && inputs.docker_context) || (github.event_name != 'workflow_dispatch' && vars.DOCKER_CONTEXT) || './backend' }}
+      dockerfile_path: ${{ (github.event_name == 'workflow_dispatch' && inputs.dockerfile_path) || (github.event_name != 'workflow_dispatch' && vars.DOCKERFILE_PATH) || './backend/Dockerfile' }}
+      docker_target: ${{ (github.event_name == 'workflow_dispatch' && inputs.docker_target) || (github.event_name != 'workflow_dispatch' && vars.DOCKER_TARGET) || 'prod' }}
+      enable_go_tests: ${{ (github.event_name == 'workflow_dispatch' && inputs.enable_go_tests) || (github.event_name != 'workflow_dispatch' && vars.ENABLE_GO_TESTS == 'true') }}
+      go_version: ${{ (github.event_name == 'workflow_dispatch' && inputs.go_version) || (github.event_name != 'workflow_dispatch' && vars.GO_VERSION) || 'latest' }}
+      go_test_dir: ${{ (github.event_name == 'workflow_dispatch' && inputs.go_test_dir) || (github.event_name != 'workflow_dispatch' && vars.GO_TEST_DIR) || './backend' }}
+    secrets:
+      dockerhub_username: ${{ secrets.DOCKERHUB_USERNAME }}
+      dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}

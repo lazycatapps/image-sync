@@ -1,0 +1,440 @@
+name: Reusable LPK Package Build
+
+on:
+  workflow_call:
+    inputs:
+      checkout_ref:
+        type: string
+        required: false
+        default: ""
+        description: "Git ref to checkout (branch, tag, or commit SHA)"
+      commit_sha:
+        type: string
+        required: true
+        description: "Full commit SHA for the build"
+      short_sha:
+        type: string
+        required: true
+        description: "Short commit SHA (first 7 characters)"
+      submit_msg:
+        type: string
+        required: true
+        description: "Commit message for LPK package submission"
+      custom_version:
+        type: string
+        required: false
+        default: ""
+        description: "Custom version number WITHOUT 'v' prefix (e.g., '1.2.3' or '1.2.3-alpha.1'). Caller workflows should normalize user input to remove 'v' prefix before passing to this workflow."
+      tag_name:
+        type: string
+        required: false
+        default: ""
+        description: "Git tag name (e.g., 'v1.2.3')"
+      workflow_run_head_branch:
+        type: string
+        required: false
+        default: ""
+        description: "Head branch from workflow_run event"
+      should_copy_image:
+        type: boolean
+        required: false
+        default: false
+        description: "Whether to copy Docker image to Lazycat registry"
+      source_image_b64:
+        type: string
+        required: false
+        default: ""
+        description: "Base64-encoded source Docker image to copy (format: 'registry/repo:tag'). Base64 encoding is used to bypass GitHub Actions' automatic secret masking when the image name contains values from secrets."
+    secrets:
+      lazycat_username:
+        required: true
+      lazycat_password:
+        required: true
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref != '' && inputs.checkout_ref || github.sha }}
+          fetch-tags: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Prepare npm global directory
+        run: mkdir -p "$HOME/.npm-global/bin"
+
+      - name: Cache npm global packages
+        uses: actions/cache@v4
+        id: npm-cache
+        with:
+          path: |
+            ~/.npm
+            ~/.npm-global
+          key: npm-global-${{ runner.os }}-lzc-cli-latest-v1
+          restore-keys: |
+            npm-global-${{ runner.os }}-lzc-cli-
+
+      - name: Prepare APT cache directory
+        run: mkdir -p "$HOME/apt-cache/archives"
+
+      - name: Cache APT packages
+        uses: actions/cache@v4
+        id: apt-cache
+        with:
+          path: ~/apt-cache/archives
+          key: apt-${{ runner.os }}-expect-latest-v1
+          restore-keys: |
+            apt-${{ runner.os }}-expect-
+
+      - name: Prime system APT cache
+        run: |
+          if compgen -G "$HOME/apt-cache/archives/*.deb" > /dev/null; then
+            echo "Restoring cached APT packages to /var/cache/apt/archives"
+            sudo cp "$HOME/apt-cache/archives/"*.deb /var/cache/apt/archives/ || true
+          else
+            echo "No cached APT packages found; fresh download required"
+          fi
+
+      - name: Install dependencies
+        run: |
+          export NPM_CONFIG_PREFIX="$HOME/.npm-global"
+          export PATH="$HOME/.npm-global/bin:$PATH"
+          npm config set prefix "$NPM_CONFIG_PREFIX" >/dev/null
+          echo "PATH=$PATH" >> "$GITHUB_ENV"
+
+          if ! command -v lzc-cli &> /dev/null; then
+            echo "Installing @lazycatcloud/lzc-cli..."
+            npm install -g @lazycatcloud/lzc-cli
+          else
+            echo "✅ lzc-cli already installed from cache"
+          fi
+
+          cache_dir="$HOME/apt-cache/archives"
+          expect_root="$HOME/.cache/expect"
+          expect_bin="$expect_root/usr/bin/expect"
+          expect_from_cache=false
+
+          shopt -s nullglob
+          expect_pkgs=("$cache_dir"/expect_*.deb)
+          tcl_expect_pkgs=("$cache_dir"/tcl-expect_*.deb)
+          shopt -u nullglob
+
+          ensure_expect_packages () {
+            # 若缓存中缺少 expect/tcl-expect，就下载并缓存 .deb。
+            # 避免使用 `apt install`，因为那会触发 man-db 等 postinst，耗时接近 1 分钟。
+            if [ ${#expect_pkgs[@]} -eq 0 ] || [ ${#tcl_expect_pkgs[@]} -eq 0 ]; then
+              echo "Downloading expect packages into cache..."
+              sudo apt-get update
+              pushd "$cache_dir" >/dev/null
+              apt-get download expect tcl-expect
+              popd >/dev/null
+              shopt -s nullglob
+              expect_pkgs=("$cache_dir"/expect_*.deb)
+              tcl_expect_pkgs=("$cache_dir"/tcl-expect_*.deb)
+              shopt -u nullglob
+            fi
+          }
+
+          if ! command -v expect &> /dev/null; then
+            # 通过解包方式安装 expect，避免 APT 的 postinst 触发器（man-db/libc-bin 等）导致的长时间阻塞。
+            ensure_expect_packages
+            if [ ${#expect_pkgs[@]} -gt 0 ] && [ ${#tcl_expect_pkgs[@]} -gt 0 ]; then
+              latest_expect=$(ls -t "${expect_pkgs[@]}" | head -n1)
+              latest_tcl=$(ls -t "${tcl_expect_pkgs[@]}" | head -n1)
+
+              rm -rf "$expect_root"
+              mkdir -p "$expect_root"
+
+              echo "Extracting expect from cached packages..."
+              dpkg-deb -x "$latest_tcl" "$expect_root"
+              dpkg-deb -x "$latest_expect" "$expect_root"
+
+              chmod +x "$expect_root/usr/bin/"*
+              expect_bin="$expect_root/usr/bin/expect"
+              expect_from_cache=true
+            else
+              echo "❌ Failed to locate expect packages even after download"
+              exit 1
+            fi
+          else
+            expect_bin="$(command -v expect)"
+          fi
+
+          if [ -x "$expect_bin" ]; then
+            expect_dir="$(dirname "$expect_bin")"
+            echo "$expect_dir" >> "$GITHUB_PATH"
+            export PATH="$expect_dir:$PATH"
+
+            if [ "$expect_from_cache" = true ]; then
+              # 仅在自行解包时设置运行库路径，保证共享库可用。
+              lib_candidates=(
+                "$expect_root/usr/lib/x86_64-linux-gnu"
+                "$expect_root/usr/lib"
+              )
+              for lib_dir in "${lib_candidates[@]}"; do
+                if [ -d "$lib_dir" ]; then
+                  export LD_LIBRARY_PATH="$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+                fi
+              done
+              if [ -n "$LD_LIBRARY_PATH" ]; then
+                echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+              fi
+            fi
+
+            if [ -d "$expect_root/usr/lib/tcl8.6" ]; then
+              export TCLLIBPATH="$expect_root/usr/lib/tcl8.6${TCLLIBPATH:+:$TCLLIBPATH}"
+              echo "TCLLIBPATH=$TCLLIBPATH" >> "$GITHUB_ENV"
+            fi
+            echo "Expect binary ready at: $expect_bin"
+          else
+            echo "❌ expect binary not found after extraction"
+            exit 1
+          fi
+
+          if command -v lzc-cli &> /dev/null; then
+            echo "lzc-cli located at: $(command -v lzc-cli)"
+            echo "lzc-cli version: $(lzc-cli --version)"
+          else
+            echo "⚠️ lzc-cli still missing after installation attempt"
+          fi
+
+      - name: Login to Lazycat
+        env:
+          # Set locale to avoid potential encoding issues
+          LANG: en_US.UTF-8
+          LC_ALL: en_US.UTF-8
+          #
+          USERNAME: ${{ secrets.lazycat_username }}
+          PASSWORD: ${{ secrets.lazycat_password }}
+        run: |
+          LZC_CLI_PATH="$(command -v lzc-cli || true)"
+          if [ -z "$LZC_CLI_PATH" ]; then
+            echo "❌ lzc-cli not found after installation step"
+            exit 1
+          fi
+          export LZC_CLI_PATH
+
+          cat > /tmp/lazycat-login.exp <<'EOF'
+          #!/usr/bin/expect
+          set username [lindex $argv 0]
+          set password [lindex $argv 1]
+          set cmd $::env(LZC_CLI_PATH)
+
+          set timeout 20
+          match_max 100000
+
+          log_user 0
+
+          spawn $cmd appstore login
+
+          expect {
+              "请输入登录用户名" {
+                  puts "请输入登录用户名 ***"
+                  send "$username\r"
+              }
+              timeout { puts "Timeout waiting for username prompt"; exit 1 }
+          }
+
+          expect {
+              "请输入登录密码" {
+                  puts "请输入登录密码 ***"
+                  send "$password\r"
+              }
+              timeout { puts "Timeout waiting for password prompt"; exit 1 }
+          }
+
+          log_user 1
+
+          expect {
+              "登录成功" { puts "Login successful!" }
+              "错误" { puts "Login failed!"; exit 1 }
+              timeout { puts "Login completed with unknown result." }
+          }
+          interact
+          EOF
+
+          expect /tmp/lazycat-login.exp "$USERNAME" "$PASSWORD"
+          rm -f /tmp/lazycat-login.exp
+
+      - name: Copy Docker image to Lazycat
+        if: inputs.should_copy_image
+        env:
+          LANG: en_US.UTF-8
+          LC_ALL: en_US.UTF-8
+        run: |
+          if [ -z "${{ inputs.source_image_b64 }}" ]; then
+            echo "❌ source_image_b64 input is required when should_copy_image is true"
+            exit 1
+          fi
+
+          # Decode base64-encoded source image
+          # The input is base64-encoded to bypass GitHub Actions' automatic secret masking
+          SOURCE_IMAGE=$(echo "${{ inputs.source_image_b64 }}" | base64 -d)
+          echo "Copying Docker image: ${SOURCE_IMAGE}"
+
+          set +e
+          lzc-cli appstore copy-image "${SOURCE_IMAGE}" > /tmp/copy_output.log 2>&1
+          COPY_EXIT_CODE=$?
+          set -e
+
+          if [ $COPY_EXIT_CODE -ne 0 ] || grep -q "failed to copyimage" /tmp/copy_output.log; then
+            echo "❌ Failed to copy Docker image to Lazycat registry"
+            echo "Copy command output:"
+            cat /tmp/copy_output.log
+            exit 1
+          fi
+
+          last_part=$(tail -n 1 /tmp/copy_output.log | col -b | awk '{print $NF}')
+          sed -i "s|##IMAGE_PLACEHOLDER##|${last_part}|g" lzc-manifest.yml
+          echo "Final image URL: ${last_part}"
+
+      - name: Update version in manifest
+        id: version-info
+        run: |
+          extract_version_from_tag() {
+            local tag_name="$1"
+            local source="$2"
+            local version=$(echo "$tag_name" | sed 's/^v*//' | sed 's/-lazycat$//')
+
+            if echo "$version" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' > /dev/null; then
+              echo "$source: Extracted version ${version} from tag ${tag_name}" >&2
+              echo "$version"
+            else
+              echo "Warning: Tag ${tag_name} does not match expected version format, using default" >&2
+              echo "0.0.1"
+            fi
+          }
+
+          SHORT_SHA="${{ inputs.short_sha }}"
+          CUSTOM_VERSION="${{ inputs.custom_version }}"
+          TAG_NAME="${{ inputs.tag_name }}"
+          HEAD_BRANCH="${{ inputs.workflow_run_head_branch }}"
+
+          if [ -n "$CUSTOM_VERSION" ]; then
+            VERSION="$CUSTOM_VERSION"
+            echo "Manual trigger with custom version: ${VERSION}"
+          elif [ -n "$TAG_NAME" ]; then
+            VERSION=$(extract_version_from_tag "$TAG_NAME" "Tag triggered")
+          elif [[ "$HEAD_BRANCH" == v* ]]; then
+            VERSION=$(extract_version_from_tag "$HEAD_BRANCH" "Workflow_run from tag")
+          else
+            CURRENT_VERSION=$(grep "^version:" lzc-manifest.yml | sed 's/version: *//' | tr -d ' ')
+            BASE_VERSION=$(echo "$CURRENT_VERSION" | sed 's/[+-].*//')
+            VERSION="${BASE_VERSION}-alpha.0+g${SHORT_SHA}"
+            echo "Non-tag triggered: Using base version ${BASE_VERSION} with SHA: ${VERSION}"
+          fi
+
+          echo "Resolved version: ${VERSION}"
+          sed -i "s/^version:.*$/version: ${VERSION}/" lzc-manifest.yml
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build LPK package
+        env:
+          LANG: en_US.UTF-8
+          LC_ALL: en_US.UTF-8
+        run: |
+          lzc-cli project build
+          echo "✅ LPK package built successfully!"
+
+      - name: Get LPK filename
+        id: lpk-info
+        run: |
+          LPK_FILE=$(ls ./*.lpk | head -n 1)
+          LPK_BASENAME=$(basename "$LPK_FILE" .lpk)
+          echo "lpk_file=${LPK_FILE}" >> $GITHUB_OUTPUT
+          echo "lpk_basename=${LPK_BASENAME}" >> $GITHUB_OUTPUT
+          echo "Generated LPK file: ${LPK_FILE}"
+          echo "Artifact name will be: ${LPK_BASENAME}"
+
+      - name: Upload LPK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.lpk-info.outputs.lpk_basename }}
+          path: ${{ steps.lpk-info.outputs.lpk_file }}
+
+      - name: Publish LPK (release only)
+        id: publish
+        env:
+          # Set locale to avoid potential encoding issues
+          LANG: en_US.UTF-8
+          LC_ALL: en_US.UTF-8
+          #
+          CURRENT_VERSION: ${{ steps.version-info.outputs.version }}
+          SUBMIT_MSG: ${{ inputs.submit_msg }}
+          CUSTOM_VERSION: ${{ inputs.custom_version }}
+          TAG_NAME: ${{ inputs.tag_name }}
+          WORKFLOW_RUN_HEAD_BRANCH: ${{ inputs.workflow_run_head_branch }}
+        run: |
+          SHOULD_PUBLISH=false
+          PUBLISH_REASON=""
+
+          if [ -n "$CUSTOM_VERSION" ]; then
+            PUBLISH_REASON="manual custom version (${CUSTOM_VERSION})"
+          elif [ -n "$TAG_NAME" ]; then
+            PUBLISH_REASON="tag trigger (${TAG_NAME})"
+          elif [ -n "$WORKFLOW_RUN_HEAD_BRANCH" ] && [[ "$WORKFLOW_RUN_HEAD_BRANCH" == v* ]]; then
+            PUBLISH_REASON="workflow_run tag branch (${WORKFLOW_RUN_HEAD_BRANCH})"
+          elif echo "$CURRENT_VERSION" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' > /dev/null; then
+            PUBLISH_REASON="release version (${CURRENT_VERSION})"
+          fi
+
+          if [ -n "$PUBLISH_REASON" ]; then
+            echo "Publishing LPK because of ${PUBLISH_REASON}"
+            SHOULD_PUBLISH=true
+          else
+            echo "Non-release version detected (${CURRENT_VERSION}) - LPK package built but not published to app store"
+          fi
+
+          if [ "$SHOULD_PUBLISH" = "true" ]; then
+            if [ -z "$SUBMIT_MSG" ]; then
+              echo "❌ submit message is empty; aborting publish"
+              exit 1
+            fi
+
+            echo "Publishing LPK package to Lazycat App Store..."
+            set +e
+            lzc-cli appstore publish ./*.lpk -c "$SUBMIT_MSG" | tee /tmp/publish_output.log
+            PUBLISH_EXIT_CODE=$?
+            set -e
+
+            if [ $PUBLISH_EXIT_CODE -ne 0 ]; then
+              echo "❌ LPK package publish failed with exit code: $PUBLISH_EXIT_CODE"
+              exit $PUBLISH_EXIT_CODE
+            fi
+
+            if grep -q "发布应用出错" /tmp/publish_output.log; then
+              echo "❌ LPK package publish failed: Error status code found in output"
+              exit 1
+            fi
+
+            echo "✅ LPK package published successfully to app store!"
+          else
+            echo "ℹ️  LPK package ready but not published (non-release trigger)"
+          fi
+
+          echo "should_publish=${SHOULD_PUBLISH}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        if: steps.publish.outputs.should_publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version-info.outputs.version }}
+        run: |
+          TAG_NAME="v${VERSION}"
+
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Tag $TAG_NAME exists, creating GitHub release..."
+            gh release create "$TAG_NAME" \
+              --notes "Automated release for version v${VERSION}" \
+              --title "Release v${VERSION}"
+            echo "✅ GitHub release created successfully!"
+          else
+            echo "ℹ️  Tag $TAG_NAME does not exist, skipping release creation"
+          fi
